@@ -150,11 +150,12 @@ pub enum Special {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Strings {
+pub enum StringType {
   String,
   CowStr,
   RefStr,
   CowByte,
+  CowStaticStr,
 }
 
 /// Buffers are complicated and may be shared/owned, shared/unowned, a copy, or detached.
@@ -255,14 +256,14 @@ pub enum NumericFlag {
 pub enum Arg {
   Void,
   Special(Special),
-  String(Strings),
+  String(StringType, StringOptions),
   Buffer(BufferType, BufferMode, BufferSource),
   External(External),
   Ref(RefType, Special),
   Rc(Special),
   RcRefCell(Special),
   Option(Special),
-  OptionString(Strings),
+  OptionString(StringType, StringOptions),
   OptionNumeric(NumericArg, NumericFlag),
   OptionBuffer(BufferType, BufferMode, BufferSource),
   OptionV8Local(V8Arg),
@@ -289,6 +290,11 @@ impl Arg {
     use ParsedType::*;
     use ParsedTypeContainer::*;
 
+    let string_options = || match attr.primary {
+      Some(AttributeModifier::String(_, options)) => Ok(options),
+      _ => Err(ArgError::MissingAttribute("string", format!("{parsed:?}"))),
+    };
+
     let buffer_mode = || match attr.primary {
       Some(AttributeModifier::Buffer(mode, _)) => Ok(mode),
       _ => Err(ArgError::MissingAttribute("buffer", format!("{parsed:?}"))),
@@ -302,7 +308,7 @@ impl Arg {
     match parsed {
       CBare(TNumeric(numeric)) => Ok(Arg::Numeric(numeric, NumericFlag::None)),
       CBare(TSpecial(special)) => Ok(Arg::Special(special)),
-      CBare(TString(string)) => Ok(Arg::String(string)),
+      CBare(TString(string)) => Ok(Arg::String(string, string_options()?)),
       CBare(TBuffer(buffer)) => {
         Ok(Arg::Buffer(buffer, buffer_mode()?, buffer_source()?))
       }
@@ -310,7 +316,9 @@ impl Arg {
         Ok(Arg::OptionNumeric(special, NumericFlag::None))
       }
       COption(TSpecial(special)) => Ok(Arg::Option(special)),
-      COption(TString(string)) => Ok(Arg::OptionString(string)),
+      COption(TString(string)) => {
+        Ok(Arg::OptionString(string, string_options()?))
+      }
       COption(TBuffer(buffer)) => {
         Ok(Arg::OptionBuffer(buffer, buffer_mode()?, buffer_source()?))
       }
@@ -405,7 +413,7 @@ impl Arg {
       Arg::OptionV8Global(t) => Arg::V8Global(*t),
       Arg::OptionNumeric(t, flag) => Arg::Numeric(*t, *flag),
       Arg::Option(t) => Arg::Special(t.clone()),
-      Arg::OptionString(t) => Arg::String(*t),
+      Arg::OptionString(t, o) => Arg::String(*t, *o),
       Arg::OptionBuffer(t, m, s) => Arg::Buffer(*t, *m, *s),
       Arg::OptionState(r, t) => Arg::State(*r, t.clone()),
       Arg::OptionCppGcResource(t) => Arg::CppGcResource(t.clone()),
@@ -442,7 +450,7 @@ impl Arg {
         Arg::Void | Arg::Numeric(..) => ArgSlowRetval::RetVal,
         Arg::External(_) => ArgSlowRetval::V8Local,
         // Fast return value path for empty strings
-        Arg::String(_) => ArgSlowRetval::RetValFallible,
+        Arg::String(_, _) => ArgSlowRetval::RetValFallible,
         Arg::SerdeV8(_) => ArgSlowRetval::V8LocalFalliable,
         Arg::ToV8(_) => ArgSlowRetval::V8LocalFalliable,
         // No scope required for these
@@ -525,7 +533,7 @@ pub enum ArgMarker {
 #[derive(Debug)]
 pub enum ParsedType {
   TSpecial(Special),
-  TString(Strings),
+  TString(StringType),
   TBuffer(BufferType),
   TV8(V8Arg),
   // TODO(mmastrac): We need to carry the mut status through somehow
@@ -549,10 +557,49 @@ impl ParsedType {
         | NumericArg::isize,
       ) => Some(&[AttributeModifier::Bigint, AttributeModifier::Number]),
       TBuffer(buffer) => Some(buffer.valid_modes(position)),
-      TString(Strings::CowByte) => {
-        Some(&[AttributeModifier::String(StringMode::OneByte)])
+      TString(StringType::CowByte) => Some(&[AttributeModifier::String(
+        StringMode::OneByte,
+        StringOptions {
+          allow_interned: false,
+        },
+      )]),
+      TString(StringType::CowStaticStr) => {
+        if position == Position::Arg {
+          Some(&[AttributeModifier::String(
+            StringMode::Default,
+            StringOptions {
+              allow_interned: true,
+            },
+          )])
+        } else {
+          Some(&[])
+        }
       }
-      TString(..) => Some(&[AttributeModifier::String(StringMode::Default)]),
+      TString(..) => {
+        if position == Position::Arg {
+          Some(&[
+            AttributeModifier::String(
+              StringMode::Default,
+              StringOptions {
+                allow_interned: true,
+              },
+            ),
+            AttributeModifier::String(
+              StringMode::Default,
+              StringOptions {
+                allow_interned: false,
+              },
+            ),
+          ])
+        } else {
+          Some(&[AttributeModifier::String(
+            StringMode::Default,
+            StringOptions {
+              allow_interned: false,
+            },
+          )])
+        }
+      }
       _ => None,
     }
   }
@@ -698,10 +745,19 @@ pub struct ParsedSignature {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct StringOptions {
+  /// Whether to allow interned strings.
+  pub allow_interned: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StringMode {
-  /// Default mode.
+  /// Convert any input string into UTF-8. Invalid UTF-16 surrogates are
+  /// replaced with the Unicode replacement character (U+FFFD). This is the
+  /// default.
   Default,
-  /// One-byte strings (aka Latin-1).
+  /// Only accept strings containing chars with byte values between 0 and 255
+  /// (aka Latin-1).
   OneByte,
 }
 
@@ -744,7 +800,7 @@ pub enum AttributeModifier {
   /// see https://medium.com/fhinkel/v8-internals-how-small-is-a-small-integer-e0badc18b6da).
   Smi,
   /// #[string], for strings.
-  String(StringMode),
+  String(StringMode, StringOptions),
   /// #[state], for automatic OpState extraction.
   State,
   /// #[buffer], for buffers.
@@ -771,7 +827,7 @@ impl AttributeModifier {
       AttributeModifier::Buffer(..) => "buffer",
       AttributeModifier::Smi => "smi",
       AttributeModifier::Serde => "serde",
-      AttributeModifier::String(_) => "string",
+      AttributeModifier::String(_, _) => "string",
       AttributeModifier::State => "state",
       AttributeModifier::Global => "global",
       AttributeModifier::CppGcResource => "cppgc",
@@ -889,7 +945,12 @@ pub enum Position {
 impl Attributes {
   pub fn string() -> Self {
     Self {
-      primary: Some(AttributeModifier::String(StringMode::Default)),
+      primary: Some(AttributeModifier::String(
+        StringMode::Default,
+        StringOptions {
+          allow_interned: false,
+        },
+      )),
     }
   }
 }
@@ -1225,8 +1286,9 @@ fn parse_attribute(
       (#[number]) => Some(AttributeModifier::Number),
       (#[serde]) => Some(AttributeModifier::Serde),
       (#[smi]) => Some(AttributeModifier::Smi),
-      (#[string]) => Some(AttributeModifier::String(StringMode::Default)),
-      (#[string(onebyte)]) => Some(AttributeModifier::String(StringMode::OneByte)),
+      (#[string]) => Some(AttributeModifier::String(StringMode::Default, StringOptions { allow_interned: false })),
+      (#[string(onebyte)]) => Some(AttributeModifier::String(StringMode::OneByte, StringOptions { allow_interned: false })),
+      (#[string(interned)]) => Some(AttributeModifier::String(StringMode::Default, StringOptions { allow_interned: true })),
       (#[state]) => Some(AttributeModifier::State),
       (#[buffer]) => Some(AttributeModifier::Buffer(BufferMode::Default, BufferSource::TypedArray)),
       (#[buffer(unsafe)]) => Some(AttributeModifier::Buffer(BufferMode::Unsafe, BufferSource::TypedArray)),
@@ -1301,17 +1363,20 @@ fn parse_type_path(
     std::panic::catch_unwind(|| {
     rules!(tokens => {
       ( $( std :: str  :: )? String ) => {
-        Ok(CBare(TString(Strings::String)))
+        Ok(CBare(TString(StringType::String)))
       }
       // Note that the reference is checked below
       ( $( std :: str :: )? str ) => {
-        Ok(CBare(TString(Strings::RefStr)))
+        Ok(CBare(TString(StringType::RefStr)))
       }
       ( $( std :: borrow :: )? Cow < $( $_lt:lifetime , )? str $(,)? > ) => {
-        Ok(CBare(TString(Strings::CowStr)))
+        Ok(CBare(TString(StringType::CowStr)))
       }
       ( $( std :: borrow :: )? Cow < $( $_lt:lifetime , )? [ u8 ] $(,)? > ) => {
-        Ok(CBare(TString(Strings::CowByte)))
+        Ok(CBare(TString(StringType::CowByte)))
+      }
+      ( $( std :: borrow :: )? Cow < 'static, str $(,)? > ) => {
+        Ok(CBare(TString(StringType::CowStaticStr)))
       }
       ( $( std :: vec ::)? Vec < $ty:path $(,)? > ) => {
         Ok(CBare(TBuffer(BufferType::Vec(parse_numeric_type(&ty)?))))
@@ -1344,7 +1409,7 @@ fn parse_type_path(
       ( Option < $ty:ty $(,)? > ) => {
         match parse_type(position, attrs, &ty)? {
           Arg::Special(special) => Ok(COption(TSpecial(special))),
-          Arg::String(string) => Ok(COption(TString(string))),
+          Arg::String(string, ..) => Ok(COption(TString(string))),
           Arg::Numeric(numeric, _) => Ok(COption(TNumeric(numeric))),
           Arg::Buffer(buffer, ..) => Ok(COption(TBuffer(buffer))),
           Arg::V8Ref(RefType::Ref, v8) => Ok(COption(TV8(v8))),
@@ -1373,7 +1438,7 @@ fn parse_type_path(
     // OpState and JsRuntimeState appears in both ways
     CBare(TSpecial(Special::OpState | Special::JsRuntimeState)) => {}
     CBare(
-      TString(Strings::RefStr) | TSpecial(Special::HandleScope) | TV8(_),
+      TString(StringType::RefStr) | TSpecial(Special::HandleScope) | TV8(_),
     ) => {
       if ctx != TypePathContext::Ref {
         return Err(ArgError::MissingReference(stringify_token(tp)));
@@ -1588,7 +1653,7 @@ pub(crate) fn parse_type(
       AttributeModifier::State => {
         return parse_type_state(ty);
       }
-      AttributeModifier::String(_)
+      AttributeModifier::String(_, ..)
       | AttributeModifier::Buffer(..)
       | AttributeModifier::Bigint
       | AttributeModifier::Global => {
@@ -1676,9 +1741,13 @@ pub(crate) fn parse_type(
         }
         Type::Path(of) => {
           match parse_type_path(position, attrs, TypePathContext::Ref, of)? {
-            CBare(TString(Strings::RefStr)) => Ok(Arg::String(Strings::RefStr)),
-            COption(TString(Strings::RefStr)) => {
-              Ok(Arg::OptionString(Strings::RefStr))
+            res @ CBare(TString(StringType::RefStr)) => {
+              res.validate_attributes(position, attrs, &of)?;
+              Arg::from_parsed(res, attrs)
+            }
+            res @ COption(TString(StringType::RefStr)) => {
+              res.validate_attributes(position, attrs, &of)?;
+              Arg::from_parsed(res, attrs)
             }
             CBare(TV8(v8)) => Ok(Arg::V8Ref(mut_type, v8)),
             CBare(TSpecial(special)) => Ok(Arg::Ref(mut_type, special)),

@@ -241,6 +241,7 @@ pub struct OpState {
   pub waker: Arc<AtomicWaker>,
   pub feature_checker: Arc<FeatureChecker>,
   pub external_ops_tracker: ExternalOpsTracker,
+  pub(crate) interned_strings: Vec<&'static str>,
 }
 
 impl OpState {
@@ -253,6 +254,7 @@ impl OpState {
       external_ops_tracker: ExternalOpsTracker {
         counter: Arc::new(AtomicUsize::new(0)),
       },
+      interned_strings: Vec::new(),
     }
   }
 

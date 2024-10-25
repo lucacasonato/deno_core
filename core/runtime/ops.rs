@@ -248,6 +248,7 @@ pub fn to_string(scope: &mut v8::Isolate, string: &v8::Value) -> String {
     return String::new();
   }
 
+  // SAFETY: We checked is_string above.
   let string: &v8::String = unsafe { std::mem::transmute(string) };
   string.to_rust_string_lossy(scope)
 }
@@ -264,7 +265,7 @@ pub fn to_str<'a, const N: usize>(
     return Cow::Borrowed("");
   }
 
-  // SAFETY: We checked is_string above
+  // SAFETY: We checked is_string above.
   let string: &v8::String = unsafe { std::mem::transmute(string) };
 
   string.to_rust_cow_lossy(scope, buffer)
@@ -310,6 +311,70 @@ pub fn to_cow_one_byte(
 
     Ok(Vec::from_raw_parts(out, capacity, capacity).into())
   }
+}
+
+/// Converts a [`v8::Value`] to an owned string. If the value passed is a number,
+/// look up the relevant string in the interned strings table.
+#[inline(always)]
+pub fn to_string_maybe_interned(
+  scope: &mut v8::HandleScope,
+  state: &OpState,
+  string: &v8::Value,
+) -> String {
+  if let Some(index) = string.uint32_value(scope) {
+    // The interned string table is not usize::MAX length, so this is safe to to
+    // a wrapping subtraction as the behaviour we want is that 0 is not a valid
+    // index, as the interned strings table is 1-indexed.
+    let index = (index as usize).wrapping_sub(1);
+    let interned = *state.interned_strings.get(index).unwrap_or(&"");
+    return interned.to_owned();
+  }
+
+  return to_string(scope, string);
+}
+
+/// Converts a [`v8::Value`] to an owned string, or a borrowed string, depending
+/// on whether it fits into the provided buffer. If the value passed is a
+/// number, look up the relevant string in the interned strings table and return
+/// a borrowed string.
+#[inline(always)]
+pub fn to_str_maybe_interned<'a, const N: usize>(
+  scope: &mut v8::HandleScope,
+  state: &OpState,
+  string: &v8::Value,
+  buffer: &'a mut [MaybeUninit<u8>; N],
+) -> Cow<'a, str> {
+  if let Some(index) = string.uint32_value(scope) {
+    // The interned string table is not usize::MAX length, so this is safe to to
+    // a wrapping subtraction as the behaviour we want is that 0 is not a valid
+    // index, as the interned strings table is 1-indexed.
+    let index = (index as usize).wrapping_sub(1);
+    let interned = *state.interned_strings.get(index).unwrap_or(&"");
+    return Cow::Borrowed(interned);
+  }
+
+  return to_str(scope, string, buffer);
+}
+
+/// Converts a [`v8::Value`] to an owned string If the value passed is a number,
+/// look up the relevant string in the interned strings table and return a
+/// borrowed string.
+#[inline(always)]
+pub fn to_static_str_maybe_interned(
+  scope: &mut v8::HandleScope,
+  state: &OpState,
+  string: &v8::Value,
+) -> Cow<'static, str> {
+  if let Some(index) = string.uint32_value(scope) {
+    // The interned string table is not usize::MAX length, so this is safe to to
+    // a wrapping subtraction as the behaviour we want is that 0 is not a valid
+    // index, as the interned strings table is 1-indexed.
+    let index = (index as usize).wrapping_sub(1);
+    let interned = *state.interned_strings.get(index as usize).unwrap_or(&"");
+    return Cow::Borrowed(interned);
+  }
+
+  return Cow::Owned(to_string(scope, string));
 }
 
 /// Converts from a raw [`v8::Value`] to the expected V8 data type.

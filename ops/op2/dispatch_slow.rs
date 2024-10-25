@@ -20,7 +20,8 @@ use super::signature::ParsedSignature;
 use super::signature::RefType;
 use super::signature::RetVal;
 use super::signature::Special;
-use super::signature::Strings;
+use super::signature::StringOptions;
+use super::signature::StringType;
 use super::V8MappingError;
 use super::V8SignatureMappingError;
 use proc_macro2::Ident;
@@ -370,7 +371,12 @@ pub fn from_arg(
         };
       }
     }
-    Arg::OptionString(Strings::String) => {
+    Arg::OptionString(
+      StringType::String,
+      StringOptions {
+        allow_interned: false,
+      },
+    ) => {
       // Only requires isolate, not a full scope
       *needs_isolate = true;
       quote! {
@@ -381,14 +387,52 @@ pub fn from_arg(
         };
       }
     }
-    Arg::String(Strings::String) => {
+    Arg::OptionString(
+      StringType::String,
+      StringOptions {
+        allow_interned: true,
+      },
+    ) => {
+      *needs_scope = true;
+      *needs_opstate = true;
+      quote! {
+        let #arg_ident = if #arg_ident.is_null_or_undefined() {
+          None
+        } else {
+          Some(deno_core::_ops::to_string_maybe_interned(&mut #scope, ::std::cell::RefCell::borrow(&#opstate), &#arg_ident))
+        };
+      }
+    }
+    Arg::String(
+      StringType::String,
+      StringOptions {
+        allow_interned: false,
+      },
+    ) => {
       // Only requires isolate, not a full scope
       *needs_isolate = true;
       quote! {
         let #arg_ident = deno_core::_ops::to_string(&mut #scope, &#arg_ident);
       }
     }
-    Arg::String(Strings::RefStr) => {
+    Arg::String(
+      StringType::String,
+      StringOptions {
+        allow_interned: true,
+      },
+    ) => {
+      *needs_scope = true;
+      *needs_opstate = true;
+      quote! {
+        let #arg_ident = deno_core::_ops::to_string_maybe_interned(&mut #scope, ::std::cell::RefCell::borrow(&#opstate), &#arg_ident);
+      }
+    }
+    Arg::String(
+      StringType::RefStr,
+      StringOptions {
+        allow_interned: false,
+      },
+    ) => {
       // Only requires isolate, not a full scope
       *needs_isolate = true;
       quote! {
@@ -397,7 +441,26 @@ pub fn from_arg(
         let #arg_ident = &deno_core::_ops::to_str(&mut #scope, &#arg_ident, &mut #arg_temp);
       }
     }
-    Arg::String(Strings::CowStr) => {
+    Arg::String(
+      StringType::RefStr,
+      StringOptions {
+        allow_interned: true,
+      },
+    ) => {
+      *needs_scope = true;
+      *needs_opstate = true;
+      quote! {
+        // Trade stack space for potentially non-allocating strings
+        let mut #arg_temp: [::std::mem::MaybeUninit<u8>; deno_core::_ops::STRING_STACK_BUFFER_SIZE] = [::std::mem::MaybeUninit::uninit(); deno_core::_ops::STRING_STACK_BUFFER_SIZE];
+        let #arg_ident = &deno_core::_ops::to_str_maybe_interned(&mut #scope, ::std::cell::RefCell::borrow(&#opstate), &#arg_ident, &mut #arg_temp);
+      }
+    }
+    Arg::String(
+      StringType::CowStr,
+      StringOptions {
+        allow_interned: false,
+      },
+    ) => {
       // Only requires isolate, not a full scope
       *needs_isolate = true;
       quote! {
@@ -406,7 +469,38 @@ pub fn from_arg(
         let #arg_ident = deno_core::_ops::to_str(&mut #scope, &#arg_ident, &mut #arg_temp);
       }
     }
-    Arg::String(Strings::CowByte) => {
+    Arg::String(
+      StringType::CowStr,
+      StringOptions {
+        allow_interned: true,
+      },
+    ) => {
+      *needs_scope = true;
+      *needs_opstate = true;
+      quote! {
+        // Trade stack space for potentially non-allocating strings
+        let mut #arg_temp: [::std::mem::MaybeUninit<u8>; deno_core::_ops::STRING_STACK_BUFFER_SIZE] = [::std::mem::MaybeUninit::uninit(); deno_core::_ops::STRING_STACK_BUFFER_SIZE];
+        let #arg_ident = deno_core::_ops::to_str_maybe_interned(&mut #scope, ::std::cell::RefCell::borrow(&#opstate), &#arg_ident, &mut #arg_temp);
+      }
+    }
+    Arg::String(
+      StringType::CowStaticStr,
+      StringOptions {
+        allow_interned: true,
+      },
+    ) => {
+      *needs_scope = true;
+      *needs_opstate = true;
+      quote! {
+        let #arg_ident = deno_core::_ops::to_static_str_maybe_interned(&mut #scope, ::std::cell::RefCell::borrow(&#opstate), &#arg_ident);
+      }
+    }
+    Arg::String(
+      StringType::CowByte,
+      StringOptions {
+        allow_interned: false,
+      },
+    ) => {
       // Only requires isolate, not a full scope
       *needs_isolate = true;
       let throw_exception =

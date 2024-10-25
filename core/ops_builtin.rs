@@ -411,6 +411,19 @@ fn op_encode_binary_string(#[buffer] s: &[u8]) -> ByteString {
   ByteString::from(s)
 }
 
+const MAX_INTERNED_STRINGS_COUNT: usize = 4096;
+
+#[op2(fast)]
+fn op_intern_string(state: &mut OpState, #[string] string: String) -> u32 {
+  if state.interned_strings.len() >= MAX_INTERNED_STRINGS_COUNT {
+    return 0;
+  }
+
+  let leaked: &'static str = Box::leak(string.into_boxed_str());
+  state.interned_strings.push(leaked);
+  state.interned_strings.len() as u32
+}
+
 #[op2(fast)]
 fn op_is_terminal(
   state: &mut OpState,
